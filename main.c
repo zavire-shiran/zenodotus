@@ -3,7 +3,7 @@
 #include <string.h>
 
 char check_table_query[] = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;";
-//char get_version_number[] = "SELECT
+char get_version_number_query[] = "SELECT version_number FROM version LIMIT 1;";
 
 char *create_tables_queries[] = 
 {"CREATE TABLE version (version_number INT NOT NULL);",
@@ -14,19 +14,16 @@ char *create_tables_queries[] =
 
 int check_for_version_table(sqlite3* db) {
 	sqlite3_stmt* stmt = NULL;
-	int rc = 0;
 	int statementdone = 0;
 	int found = 0;
 	
-	rc = sqlite3_prepare_v2(db, check_table_query, -1, &stmt, NULL);
-	if(rc) {
+	if(sqlite3_prepare_v2(db, check_table_query, -1, &stmt, NULL)) {
 		fprintf(stderr, "Error checking version: %s\n", sqlite3_errmsg(db));
 		return 2;
 	}
 	
 	while(!statementdone) {
-		rc = sqlite3_step(stmt);
-		switch(rc) {
+		switch(sqlite3_step(stmt)) {
 		case SQLITE_ROW:
 			{
 				const unsigned char* tablename = sqlite3_column_text(stmt, 0);
@@ -56,8 +53,20 @@ int check_for_version_table(sqlite3* db) {
 }
 
 int get_version(sqlite3* db) {
+	sqlite3_stmt* stmt = NULL;
+	if(sqlite3_prepare_v2(db, get_version_number_query, -1, &stmt, NULL)) {
+		fprintf(stderr, "Error getting version: %s\n", sqlite3_errmsg(db));
+		return -1;
+	}
 	
-	return 0;
+	if(sqlite3_step(stmt) != SQLITE_ROW) {
+		fprintf(stderr, "Error getting version: %s\n", sqlite3_errmsg(db));
+		return -1;
+	}
+
+	int version = sqlite3_column_int(stmt, 0);
+	sqlite3_finalize(stmt);
+	return version;
 }
 
 int create_tables(sqlite3* db) {
