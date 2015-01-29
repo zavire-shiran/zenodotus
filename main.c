@@ -1,10 +1,12 @@
+#include <sys/types.h>
+
 #include <getopt.h>
+#include <limits.h>
+#include <sha2.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/types.h>
-#include <sha2.h>
 
 const char check_table_query[] = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;";
 const char get_version_number_query[] = "SELECT version_number FROM version LIMIT 1;";
@@ -206,9 +208,15 @@ int add_subcommand(sqlite3* db, int argc, char** argv) {
 
 	for(i = 0; argv[i] != NULL; ++i) {
 		if(SHA256File(argv[i], digest) == NULL) {
-			fprintf(stderr, "Error reading file: %s\n", argv[i]);
+			fprintf(stderr, "Error reading file: %s.\n", argv[i]);
 		} else {
-			printf("%s %s\n", digest, argv[i]);
+			char* abspath = realpath(argv[i], NULL);
+			if(abspath == NULL) {
+				fprintf(stderr, "realpath() failed on %s.\n", argv[i]);
+			} else {
+				printf("%s %s\n", digest, abspath);
+				free(abspath);
+			}
 		}
 	}
 
