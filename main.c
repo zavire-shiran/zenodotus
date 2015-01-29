@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
+#include <sha2.h>
 
 const char check_table_query[] = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;";
 const char get_version_number_query[] = "SELECT version_number FROM version LIMIT 1;";
@@ -167,9 +169,50 @@ sqlite3* open_database(const char* file_name) {
 	return db;
 }
 
+void print_argv(char** argv) {
+	for(; *argv; ++argv) {
+		printf("%s\n", *argv);
+	}
+}
+
 int add_subcommand(sqlite3* db, int argc, char** argv) {
-	fprintf(stderr, "add not implemented.\n");
-	return 1;
+	int ch = 0;
+	int vault = 0;
+	char digest[SHA256_DIGEST_STRING_LENGTH];
+	int i;
+
+	optreset = 1;
+	optind = 1;
+
+	while((ch = getopt_long(argc, argv, "v", add_command_line_options, NULL)) != -1) {
+		switch(ch) {
+		case 'v':
+			vault = 1;
+			fprintf(stderr, "vault option not implemented.\n");
+			return 1;
+		default:
+			fprintf(stderr, "add option loop\n");
+			return 1;
+		};
+	}
+
+	argc -= optind;
+	argv += optind;
+
+	if(argc <= 0) {
+		fprintf(stderr, "No files to add.\n");
+		return 1;
+	}
+
+	for(i = 0; argv[i] != NULL; ++i) {
+		if(SHA256File(argv[i], digest) == NULL) {
+			fprintf(stderr, "Error reading file: %s\n", argv[i]);
+		} else {
+			printf("%s %s\n", digest, argv[i]);
+		}
+	}
+
+	return 0;
 }
 
 subcommand_info valid_subcommands[] =
@@ -194,8 +237,14 @@ int main(int argc, char** argv) {
 			strlcpy(database_file_name, optarg, database_file_name_length);
 			break;
 		default:
+			fprintf(stderr, "main option loop\n");
 			return 1;
 		};
+
+		// The first non-option argument must be the command name, so stop there.
+		if(argv[optind] != NULL && argv[optind][0] != '-') {
+			break;
+		}
 	}
 
 	argc -= optind;
