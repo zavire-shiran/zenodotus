@@ -18,6 +18,8 @@ const char* create_tables_queries[] =
  "INSERT INTO version VALUES (1);",
  NULL};
 
+const char insert_file_query[] = "INSERT INTO hashes VALUES (?, ?);";
+
 char* database_file_name = NULL;
 size_t database_file_name_length = 0;
 
@@ -122,23 +124,6 @@ int create_tables(sqlite3* db) {
 	return 0;
 }
 
-int set_default_filename() {
-	char* homedir = getenv("HOME");
-	char* default_filename = "/.zenodotus.sqlite3";
-
-	if(homedir == NULL) {
-		fprintf(stderr, "ERROR: $HOME is not defined. How does that even happen?\n");
-		return 1;
-	}
-
-	database_file_name_length = strlen(homedir) + strlen(default_filename) + 1;
-	database_file_name = calloc(database_file_name_length, sizeof(char));
-	strlcpy(database_file_name, homedir, database_file_name_length);
-	strlcat(database_file_name, default_filename, database_file_name_length);
-
-	return 0;
-}
-
 sqlite3* open_database(const char* file_name) {
 	sqlite3* db;
 	int version = 0;
@@ -171,17 +156,74 @@ sqlite3* open_database(const char* file_name) {
 	return db;
 }
 
-void print_argv(char** argv) {
-	for(; *argv; ++argv) {
-		printf("%s\n", *argv);
+void close_database(sqlite3* db) {
+	sqlite3_close(db);
+}
+
+int set_default_filename() {
+	char* homedir = getenv("HOME");
+	char* default_filename = "/.zenodotus.sqlite3";
+
+	if(homedir == NULL) {
+		fprintf(stderr, "ERROR: $HOME is not defined. How does that even happen?\n");
+		return 1;
 	}
+
+	database_file_name_length = strlen(homedir) + strlen(default_filename) + 1;
+	database_file_name = calloc(database_file_name_length, sizeof(char));
+	strlcpy(database_file_name, homedir, database_file_name_length);
+	strlcat(database_file_name, default_filename, database_file_name_length);
+
+	return 0;
+}
+
+int add_file(sqlite3* db, const char* filename) {
+	char digest[SHA256_DIGEST_STRING_LENGTH];
+
+	if(SHA256File(filename, digest) == NULL) {
+		fprintf(stderr, "Error reading file: %s.\n", filename);
+		return 1;
+	} else {
+		char* abspath = realpath(filename, NULL);
+
+		if(abspath != NULL) {
+			sqlite3_stmt* stmt = NULL;
+			printf("%s %s\n", digest, abspath);
+
+			if(sqlite3_prepare_v2(db, insert_file_query, -1, &stmt, NULL)) {
+				fprintf(stderr, "Error adding file to database: %s\n", sqlite3_errmsg(db));
+				return 1;
+			}
+
+			if(sqlite3_bind_text(stmt, 1, digest, -1, SQLITE_TRANSIENT) ||
+			   sqlite3_bind_text(stmt, 2, abspath, -1, SQLITE_TRANSIENT)) {
+				fprintf(stderr, "Error binding to prepared statement: %s\n", sqlite3_errmsg(db));
+				sqlite3_finalize(stmt);
+				return 1;
+			}
+
+			if(sqlite3_step(stmt) != SQLITE_DONE) {
+				fprintf(stderr, "Error inserting hash for file %s: %s\n", filename, sqlite3_errmsg(db));
+				sqlite3_finalize(stmt);
+				return 1;
+			}
+
+			free(abspath);
+			sqlite3_finalize(stmt);
+		} else {
+			fprintf(stderr, "realpath() failed on %s.\n", filename);
+			return 1;
+		}
+	}
+
+	return 0;
 }
 
 int add_subcommand(sqlite3* db, int argc, char** argv) {
 	int ch = 0;
 	int vault = 0;
-	char digest[SHA256_DIGEST_STRING_LENGTH];
 	int i;
+	int return_code = 0;
 
 	optreset = 1;
 	optind = 1;
@@ -193,7 +235,6 @@ int add_subcommand(sqlite3* db, int argc, char** argv) {
 			fprintf(stderr, "vault option not implemented.\n");
 			return 1;
 		default:
-			fprintf(stderr, "add option loop\n");
 			return 1;
 		};
 	}
@@ -207,20 +248,12 @@ int add_subcommand(sqlite3* db, int argc, char** argv) {
 	}
 
 	for(i = 0; argv[i] != NULL; ++i) {
-		if(SHA256File(argv[i], digest) == NULL) {
-			fprintf(stderr, "Error reading file: %s.\n", argv[i]);
-		} else {
-			char* abspath = realpath(argv[i], NULL);
-			if(abspath == NULL) {
-				fprintf(stderr, "realpath() failed on %s.\n", argv[i]);
-			} else {
-				printf("%s %s\n", digest, abspath);
-				free(abspath);
-			}
+		if(add_file(db, argv[i]) != 0) {
+			return_code = 1;
 		}
 	}
 
-	return 0;
+	return return_code;
 }
 
 subcommand_info valid_subcommands[] =
@@ -230,6 +263,7 @@ subcommand_info valid_subcommands[] =
 int main(int argc, char** argv) {
 	sqlite3* db = NULL;
 	int ch = 0;
+	int return_code = 0;
 	subcommand_func subcommand = NULL;
 	subcommand_info* subcomm_info = NULL;
 
@@ -245,11 +279,10 @@ int main(int argc, char** argv) {
 			strlcpy(database_file_name, optarg, database_file_name_length);
 			break;
 		default:
-			fprintf(stderr, "main option loop\n");
 			return 1;
 		};
 
-		// The first non-option argument must be the command name, so stop there.
+		// The first non-option argument must be the subcommand name, so stop there.
 		if(argv[optind] != NULL && argv[optind][0] != '-') {
 			break;
 		}
@@ -281,5 +314,9 @@ int main(int argc, char** argv) {
 		return 1;
 	}
 
-	return subcommand(db, argc, argv);
+	return_code = subcommand(db, argc, argv);
+
+	close_database(db);
+
+	return return_code;
 }
