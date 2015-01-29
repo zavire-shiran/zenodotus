@@ -19,6 +19,7 @@ const char* create_tables_queries[] =
  NULL};
 
 const char insert_file_query[] = "INSERT INTO hashes VALUES (?, ?);";
+const char check_for_duplicate_query[] = "SELECT * from hashes WHERE hash = ? OR file = ?;";
 
 char* database_file_name = NULL;
 size_t database_file_name_length = 0;
@@ -177,6 +178,39 @@ int set_default_filename() {
 	return 0;
 }
 
+int check_for_duplicate(sqlite3* db, const char* filename, const char* digest) {
+	sqlite3_stmt* stmt = NULL;
+	int step_return = 0;
+
+	if(sqlite3_prepare_v2(db, check_for_duplicate_query, -1, &stmt, NULL)) {
+		fprintf(stderr, "Error checking duplicate: %s\n", sqlite3_errmsg(db));
+		return 1;
+	}
+
+	if(sqlite3_bind_text(stmt, 1, digest, -1, SQLITE_TRANSIENT) ||
+	   sqlite3_bind_text(stmt, 2, filename, -1, SQLITE_TRANSIENT)) {
+		fprintf(stderr, "Error checking duplicate: %s\n", sqlite3_errmsg(db));
+		sqlite3_finalize(stmt);
+		return 1;
+	}
+
+	step_return = sqlite3_step(stmt);
+	if(step_return != SQLITE_DONE) {
+		printf("Duplicate detected:\n");
+		do {
+			if(step_return == SQLITE_ROW) {
+				printf("  %s  %s\n", sqlite3_column_text(stmt, 0), sqlite3_column_text(stmt, 1));
+				step_return = sqlite3_step(stmt);
+			} else {
+				fprintf(stderr, "Error checking duplicates: %s\n", sqlite3_errmsg(db));
+			}
+		} while(step_return == SQLITE_ROW);
+		return 1;
+	}
+
+	return 0;
+}
+
 int add_file(sqlite3* db, const char* filename) {
 	char digest[SHA256_DIGEST_STRING_LENGTH];
 
@@ -188,7 +222,11 @@ int add_file(sqlite3* db, const char* filename) {
 
 		if(abspath != NULL) {
 			sqlite3_stmt* stmt = NULL;
-			printf("%s %s\n", digest, abspath);
+			printf("%s  %s\n", digest, abspath);
+
+			if(check_for_duplicate(db, abspath, digest)) {
+				return 1;
+			}
 
 			if(sqlite3_prepare_v2(db, insert_file_query, -1, &stmt, NULL)) {
 				fprintf(stderr, "Error adding file to database: %s\n", sqlite3_errmsg(db));
@@ -197,7 +235,7 @@ int add_file(sqlite3* db, const char* filename) {
 
 			if(sqlite3_bind_text(stmt, 1, digest, -1, SQLITE_TRANSIENT) ||
 			   sqlite3_bind_text(stmt, 2, abspath, -1, SQLITE_TRANSIENT)) {
-				fprintf(stderr, "Error binding to prepared statement: %s\n", sqlite3_errmsg(db));
+				fprintf(stderr, "Error adding file to database: %s\n", sqlite3_errmsg(db));
 				sqlite3_finalize(stmt);
 				return 1;
 			}
