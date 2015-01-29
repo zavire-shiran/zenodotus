@@ -4,10 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-char check_table_query[] = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;";
-char get_version_number_query[] = "SELECT version_number FROM version LIMIT 1;";
+const char check_table_query[] = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;";
+const char get_version_number_query[] = "SELECT version_number FROM version LIMIT 1;";
 
-char* create_tables_queries[] =
+const char* create_tables_queries[] =
 {"CREATE TABLE version (version_number INT NOT NULL);",
  "CREATE TABLE hashes (hash TEXT NOT NULL PRIMARY KEY, file TEXT NOT NULL);",
  "CREATE TABLE tags (hash TEXT NOT NULL PRIMARY KEY, tagname TEXT NOT NULL, tagval TEXT DEFAULT NULL);",
@@ -17,13 +17,20 @@ char* create_tables_queries[] =
 char* database_file_name = NULL;
 size_t database_file_name_length = 0;
 
+typedef int (*subcommand_func)(sqlite3*, int, char**);
+
+typedef struct _subcommand_info {
+	const char* name;
+	subcommand_func function;
+} subcommand_info;
+
 static struct option global_command_line_options[] = {
 	{"file",        required_argument,        NULL,        'f'},
 	{NULL,          0,                        NULL,         0}
 };
 
 static struct option add_command_line_options[] = {
-	{"inplace",     no_argument,              NULL,        'i'},
+	{"vault",       no_argument,              NULL,        'v'},
 	{NULL,          0,                        NULL,         0}
 };
 
@@ -87,8 +94,8 @@ int get_version(sqlite3* db) {
 int create_tables(sqlite3* db) {
 	sqlite3_stmt* stmt = NULL;
 	
-	for(int i = 0; create_tables_queries[i]; ++i) {
-		char* query = create_tables_queries[i];
+	for(int i = 0; create_tables_queries[i] != NULL; ++i) {
+		const char* query = create_tables_queries[i];
 		
 		int rc = sqlite3_prepare_v2(db, query, -1, &stmt, NULL);
 		if(rc) {
@@ -141,7 +148,7 @@ sqlite3* open_database(const char* file_name) {
 	}
 	
 	rc = check_for_version_table(db);
-	// rc == 1 means the table was not found
+	// rc == 1 means the table was not found. we'll create it after checking for other errors.
 	if(rc == 0) {
 		version = get_version(db);
 	} else if(rc == 2) {
@@ -160,9 +167,20 @@ sqlite3* open_database(const char* file_name) {
 	return db;
 }
 
+int add_subcommand(sqlite3* db, int argc, char** argv) {
+	fprintf(stderr, "add not implemented.\n");
+	return 1;
+}
+
+subcommand_info valid_subcommands[] =
+ {{"add", add_subcommand},
+  {NULL, NULL}};
+
 int main(int argc, char** argv) {
-	sqlite3* db;
-	int ch;
+	sqlite3* db = NULL;
+	int ch = 0;
+	subcommand_func subcommand = NULL;
+	subcommand_info* subcomm_info = NULL;
 
 	if(set_default_filename()) {
 		return 1;
@@ -185,8 +203,26 @@ int main(int argc, char** argv) {
 
 	printf("Database file name: %s\n", database_file_name);
 
+	if(argc <= 0) {
+		fprintf(stderr, "No action specified.\n");
+		return 1;
+	}
+
+	for(subcomm_info = valid_subcommands; subcomm_info->name != NULL; ++subcomm_info) {
+		if(strcmp(subcomm_info->name, argv[0]) == 0) {
+			subcommand = subcomm_info->function;
+		}
+	}
+
+	if(subcommand == NULL) {
+		fprintf(stderr, "\"%s\" is not a valid subcommand.\n", argv[0]);
+		return 1;
+	}
+
 	db = open_database(database_file_name);
 	if(db == NULL) {
 		return 1;
 	}
+
+	return subcommand(db, argc, argv);
 }
