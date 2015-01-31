@@ -309,20 +309,22 @@ int main(int argc, char** argv) {
 		return 1;
 	}
 
-	while((ch = getopt_long(argc, argv, "f:", global_command_line_options, NULL)) != -1) {
-		switch(ch) {
-		case 'f':
-			database_file_name_length = strlen(optarg) + 1;
-			database_file_name = reallocarray(database_file_name, database_file_name_length, sizeof(char));
-			strlcpy(database_file_name, optarg, database_file_name_length);
-			break;
-		default:
-			return 1;
-		};
+	if(argv[1][0] == '-') {
+		while((ch = getopt_long(argc, argv, "f:", global_command_line_options, NULL)) != -1) {
+			switch(ch) {
+			case 'f':
+				database_file_name_length = strlen(optarg) + 1;
+				database_file_name = reallocarray(database_file_name, database_file_name_length, sizeof(char));
+				strlcpy(database_file_name, optarg, database_file_name_length);
+				break;
+			default:
+				return 1;
+			};
 
-		// The first non-option argument must be the subcommand name, so stop there.
-		if(argv[optind] != NULL && argv[optind][0] != '-') {
-			break;
+			// The first non-option argument must be the subcommand name, so stop there.
+			if(argv[optind] != NULL && argv[optind][0] != '-') {
+				break;
+			}
 		}
 	}
 
