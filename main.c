@@ -14,12 +14,14 @@ const char get_version_number_query[] = "SELECT version_number FROM version LIMI
 const char* create_tables_queries[] =
 {"CREATE TABLE version (version_number INT NOT NULL);",
  "CREATE TABLE hashes (hash TEXT NOT NULL PRIMARY KEY, file TEXT NOT NULL);",
- "CREATE TABLE tags (hash TEXT NOT NULL PRIMARY KEY, tagname TEXT NOT NULL, tagval TEXT DEFAULT NULL);",
+ "CREATE TABLE tags (hash TEXT NOT NULL, name TEXT NOT NULL, value TEXT DEFAULT NULL);",
  "INSERT INTO version VALUES (1);",
  NULL};
 
 const char insert_file_query[] = "INSERT INTO hashes VALUES (?, ?);";
 const char check_for_duplicate_query[] = "SELECT * from hashes WHERE hash = ? OR file = ?;";
+const char add_tag_query[] = "INSERT INTO tags VALUES (?, ?, ?);";
+const char get_hash_by_filename_query[] = "SELECT hash FROM hashes WHERE file = ? LIMIT 1;";
 
 char* database_file_name = NULL;
 size_t database_file_name_length = 0;
@@ -38,6 +40,10 @@ static struct option global_command_line_options[] = {
 
 static struct option add_command_line_options[] = {
 	{"vault",       no_argument,              NULL,        'v'},
+	{NULL,          0,                        NULL,         0}
+};
+
+static struct option null_command_line_options[] = {
 	{NULL,          0,                        NULL,         0}
 };
 
@@ -234,7 +240,7 @@ int add_file(sqlite3* db, const char* filename) {
 			}
 
 			if(sqlite3_bind_text(stmt, 1, digest, -1, SQLITE_TRANSIENT) ||
-			   sqlite3_bind_text(stmt, 2, abspath, -1, SQLITE_TRANSIENT)) {
+			    sqlite3_bind_text(stmt, 2, abspath, -1, SQLITE_TRANSIENT)) {
 				fprintf(stderr, "Error adding file to database: %s\n", sqlite3_errmsg(db));
 				sqlite3_finalize(stmt);
 				return 1;
@@ -253,6 +259,118 @@ int add_file(sqlite3* db, const char* filename) {
 			return 1;
 		}
 	}
+
+	return 0;
+}
+
+int tag_hash(sqlite3* db, const char* hash, const char* tag, const char* value) {
+	sqlite3_stmt* stmt = NULL;
+	printf("%s %s %p\n", hash, tag, value);
+	if(sqlite3_prepare_v2(db, add_tag_query, -1, &stmt, NULL)) {
+		fprintf(stderr, "Error 1 adding tag to database: %s\n", sqlite3_errmsg(db));
+		return 1;
+	}
+
+	if(sqlite3_bind_text(stmt, 1, hash, -1, SQLITE_TRANSIENT) ||
+	    sqlite3_bind_text(stmt, 2, tag, -1, SQLITE_TRANSIENT)) {
+		fprintf(stderr, "Error 2 adding tag to database: %s\n", sqlite3_errmsg(db));
+		sqlite3_finalize(stmt);
+		return 1;
+	}
+
+	if(value) {
+		if(sqlite3_bind_text(stmt, 3, value, -1, SQLITE_TRANSIENT)) {
+			fprintf(stderr, "Error 3 adding tag to database: %s\n", sqlite3_errmsg(db));
+			sqlite3_finalize(stmt);
+			return 1;
+		}
+	}
+
+	if(sqlite3_step(stmt) != SQLITE_DONE) {
+		fprintf(stderr, "Error 4 inserting tag %s for hash %s: %s\n", tag, hash, sqlite3_errmsg(db));
+		sqlite3_finalize(stmt);
+		return 1;
+	}
+
+	return 0;
+}
+
+const char* get_hash_by_filename(sqlite3* db, const char* filename) {
+	sqlite3_stmt* stmt = NULL;
+	const char* hash = NULL;
+	char* ret_hash = NULL;
+
+	if(sqlite3_prepare_v2(db, get_hash_by_filename_query, -1, &stmt, NULL)) {
+		fprintf(stderr, "Error 1 adding getting hash for file %s: %s\n", filename, sqlite3_errmsg(db));
+		return NULL;
+	}
+
+	if(sqlite3_bind_text(stmt, 1, filename, -1, SQLITE_TRANSIENT)) {
+		fprintf(stderr, "Error 2 getting hash for file %s: %s\n", filename, sqlite3_errmsg(db));
+		sqlite3_finalize(stmt);
+		return NULL;
+	}
+
+	if(sqlite3_step(stmt) != SQLITE_ROW) {
+		fprintf(stderr, "Error 3 getting hash for file %s: %s\n", filename, sqlite3_errmsg(db));
+		sqlite3_finalize(stmt);
+		return NULL;
+	}
+
+	hash = sqlite3_column_text(stmt, 0);
+	ret_hash = calloc(strlen(hash) + 1, sizeof(char));
+	strlcpy(ret_hash, hash, strlen(hash) + 1);
+
+	sqlite3_finalize(stmt);
+	return ret_hash;
+}
+
+int tag_file(sqlite3* db, const char* filename, const char* tag, const char* value) {
+	char* abspath = realpath(filename, NULL);
+	const char* hash = get_hash_by_filename(db, abspath);
+	int ret = 0;
+
+	free(abspath);
+
+	if(hash == NULL) {
+		return 1;
+	}
+
+	ret = tag_hash(db, hash, tag, value);
+	return ret;
+}
+
+int tag_subcommand(sqlite3* db, int argc, char** argv) {
+	int ch = 0;
+	const char* filename = NULL;
+	const char* tag = NULL;
+	const char* value = NULL;
+
+	optreset = 1;
+	optind = 1;
+
+	while((ch = getopt_long(argc, argv, "", null_command_line_options, NULL)) != -1) {
+		switch(ch) {
+		default:
+			return 1;
+		};
+	}
+
+	argc -= optind;
+	argv += optind;
+
+	if(argc != 2 && argc != 3) {
+		fprintf(stderr, "TODO: tag usage message\n");
+		return 1;
+	}
+
+	filename = argv[0];
+	tag = argv[1];
+	if(argc == 3) {
+		value = argv[2];
+	}
+
+	tag_file(db, filename, tag, value);
 
 	return 0;
 }
@@ -296,6 +414,7 @@ int add_subcommand(sqlite3* db, int argc, char** argv) {
 
 subcommand_info valid_subcommands[] =
  {{"add", add_subcommand},
+  {"tag", tag_subcommand},
   {NULL, NULL}};
 
 int main(int argc, char** argv) {
