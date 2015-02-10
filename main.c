@@ -1,5 +1,7 @@
 #include <sys/types.h>
+#include <sys/stat.h>
 
+#include <dirent.h>
 #include <getopt.h>
 #include <limits.h>
 #include <sha2.h>
@@ -8,14 +10,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+const char tags_db_filename[] = "tags.sqlite3";
+const char hashes_directoryname[] = "hashes";
+
 const char check_table_query[] = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;";
 const char get_version_number_query[] = "SELECT version_number FROM version LIMIT 1;";
 
 const char* create_tables_queries[] =
-{"CREATE TABLE version (version_number INT NOT NULL);",
+{"CREATE TABLE settings (name TEXT NOT NULL PRIMARY KEY, value TEXT NOT NULL);",
  "CREATE TABLE hashes (hash TEXT NOT NULL PRIMARY KEY, file TEXT NOT NULL);",
- "CREATE TABLE tags (hash TEXT NOT NULL, name TEXT NOT NULL, value TEXT DEFAULT NULL);",
- "INSERT INTO version VALUES (1);",
+ "CREATE TABLE tags (hash TEXT NOT NULL, name TEXT NOT NULL, value TEXT);",
+ "INSERT INTO settings VALUES (\"version\", 1);",
  NULL};
 
 const char insert_file_query[] = "INSERT INTO hashes VALUES (?, ?);";
@@ -47,16 +52,35 @@ static struct option null_command_line_options[] = {
 	{NULL,          0,                        NULL,         0}
 };
 
+int isdirempty(const char* dirname) {
+	DIR* dir = NULL;
+	struct dirent* entry = NULL;
+	int ret_code = 0;
+
+	dir = opendir(dirname);
+	if(dir == NULL) {
+		perror("Error checking isdirempty");
+		return 0;
+	}
+
+	entry = readdir(dir);
+	ret_code = entry != NULL;
+
+	closedir(dir);
+
+	return ret_code;
+}
+
 int check_for_version_table(sqlite3* db) {
 	sqlite3_stmt* stmt = NULL;
 	int statementdone = 0;
 	int found = 0;
-	
+
 	if(sqlite3_prepare_v2(db, check_table_query, -1, &stmt, NULL)) {
 		fprintf(stderr, "Error checking version: %s\n", sqlite3_errmsg(db));
 		return 2;
 	}
-	
+
 	while(!statementdone) {
 		switch(sqlite3_step(stmt)) {
 		case SQLITE_ROW:
@@ -78,7 +102,7 @@ int check_for_version_table(sqlite3* db) {
 			break;
 		};
 	}
-	
+
 	sqlite3_finalize(stmt);
 	if(found) {
 		return 0;
@@ -93,7 +117,7 @@ int get_version(sqlite3* db) {
 		fprintf(stderr, "Error getting version: %s\n", sqlite3_errmsg(db));
 		return -1;
 	}
-	
+
 	if(sqlite3_step(stmt) != SQLITE_ROW) {
 		fprintf(stderr, "Error getting version: %s\n", sqlite3_errmsg(db));
 		return -1;
@@ -106,24 +130,24 @@ int get_version(sqlite3* db) {
 
 int create_tables(sqlite3* db) {
 	sqlite3_stmt* stmt = NULL;
-	
+
 	for(int i = 0; create_tables_queries[i] != NULL; ++i) {
 		const char* query = create_tables_queries[i];
-		
+
 		int rc = sqlite3_prepare_v2(db, query, -1, &stmt, NULL);
 		if(rc) {
 			fprintf(stderr, "Error creating table: %s\n  query: %s\n", sqlite3_errmsg(db), query);
 			sqlite3_finalize(stmt);
 			return 1;
 		}
-		
+
 		rc = sqlite3_step(stmt);
 		if(rc != SQLITE_DONE) {
 			fprintf(stderr, "Error creating table: %s\n  query: %s\n", sqlite3_errmsg(db), query);
 			sqlite3_finalize(stmt);
 			return 1;
 		}
-		
+
 		sqlite3_finalize(stmt);
 		stmt = NULL;
 	}
@@ -142,7 +166,7 @@ sqlite3* open_database(const char* file_name) {
 		sqlite3_close(db);
 		return NULL;
 	}
-	
+
 	rc = check_for_version_table(db);
 	// rc == 1 means the table was not found. we'll create it after checking for other errors.
 	if(rc == 0) {
@@ -412,9 +436,103 @@ int add_subcommand(sqlite3* db, int argc, char** argv) {
 	return return_code;
 }
 
+int initialize_vault(const char* dirname) {
+	char* db_filename = NULL;
+	char* hashes_dirname = NULL;
+	sqlite3* db = NULL;
+	int db_filename_size = strlen(dirname) + strlen(tags_db_filename) + 2; // One for '/', one for '\0'
+	int hashes_dirname_size = strlen(dirname) + strlen(hashes_directoryname) + 2;
+
+	db_filename = calloc(db_filename_size, sizeof(char));
+	strlcpy(db_filename, dirname, db_filename_size);
+	strlcat(db_filename, "/", db_filename_size);
+	strlcat(db_filename, tags_db_filename, db_filename_size);
+
+	hashes_dirname = calloc(hashes_dirname_size, sizeof(char));
+	strlcpy(hashes_dirname, dirname, hashes_dirname_size);
+	strlcat(hashes_dirname, "/", hashes_dirname_size);
+	strlcat(hashes_dirname, hashes_directoryname, hashes_dirname_size);
+
+	db = open_database(db_filename);
+	if(db == NULL) {
+		fprintf(stderr, "Unable to create database\n");
+		goto error;
+	}
+	close_database(db);
+
+	if(mkdir(hashes_dirname, 0777)) {
+		perror("Error creating hashes directory");
+		goto error;
+	}
+
+	free(db_filename);
+	free(hashes_dirname);
+	return 0;
+
+error:
+	free(db_filename);
+	free(hashes_dirname);
+	return 1;
+}
+
+int init_subcommand(sqlite3* db, int argc, char** argv) {
+	int ch = 0;
+	char* dirname = ".";
+	char* fulldirname = NULL;
+	int ret_code = 0;
+	struct stat dirstat;
+
+	optreset = 1;
+	optind = 1;
+
+	while((ch = getopt_long(argc, argv, "v", add_command_line_options, NULL)) != -1) {
+		switch(ch) {
+		default:
+			return 1;
+		};
+	}
+
+	argc -= optind;
+	argv += optind;
+
+	if(argc > 1) {
+		fprintf(stderr, "Too many arguments\n.");
+		return 1;
+	} else if(argc == 1) {
+		dirname = argv[0];
+	}
+
+	fulldirname = realpath(dirname, NULL);
+	if(fulldirname == NULL) {
+		fprintf(stderr, "Invalid directory: %s", dirname);
+		return 1;
+	}
+
+	if(stat(fulldirname, &dirstat) == -1) {
+		perror("Stat failed on fulldirname");
+		return 1;
+	} else if(S_ISDIR(dirstat.st_mode) == 0) {
+		fprintf(stderr, "%s is not a directory.\n", fulldirname);
+		return 1;
+	}
+
+	if(!isdirempty(fulldirname)) {
+		fprintf(stderr, "%s is not empty.\n", fulldirname);
+		return 1;
+	}
+
+	printf("Initializing zenodotus vault in %s\n", fulldirname);
+
+	ret_code = initialize_vault(fulldirname);
+	free(fulldirname);
+
+	return ret_code;
+}
+
 subcommand_info valid_subcommands[] =
  {{"add", add_subcommand},
   {"tag", tag_subcommand},
+  {"init", init_subcommand},
   {NULL, NULL}};
 
 int main(int argc, char** argv) {
@@ -450,8 +568,6 @@ int main(int argc, char** argv) {
 	argc -= optind;
 	argv += optind;
 
-	printf("Database file name: %s\n", database_file_name);
-
 	if(argc <= 0) {
 		fprintf(stderr, "No action specified.\n");
 		return 1;
@@ -468,14 +584,7 @@ int main(int argc, char** argv) {
 		return 1;
 	}
 
-	db = open_database(database_file_name);
-	if(db == NULL) {
-		return 1;
-	}
-
 	return_code = subcommand(db, argc, argv);
-
-	close_database(db);
 
 	return return_code;
 }
