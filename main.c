@@ -1,30 +1,33 @@
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 
 #include <dirent.h>
 #include <getopt.h>
+#include <libgen.h>
 #include <limits.h>
 #include <sha2.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 const char tags_db_filename[] = "tags.sqlite3";
 const char hashes_directoryname[] = "hashes";
 
 const char check_table_query[] = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;";
-const char get_version_number_query[] = "SELECT version_number FROM version LIMIT 1;";
+const char get_version_number_query[] = "SELECT value FROM settings WHERE name='version' LIMIT 1;";
 
 const char* create_tables_queries[] =
 {"CREATE TABLE settings (name TEXT NOT NULL PRIMARY KEY, value TEXT NOT NULL);",
- "CREATE TABLE hashes (hash TEXT NOT NULL PRIMARY KEY, file TEXT NOT NULL);",
+ "CREATE TABLE hashes (hash TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL);",
  "CREATE TABLE tags (hash TEXT NOT NULL, name TEXT NOT NULL, value TEXT);",
  "INSERT INTO settings VALUES (\"version\", 1);",
  NULL};
 
 const char insert_file_query[] = "INSERT INTO hashes VALUES (?, ?);";
-const char check_for_duplicate_query[] = "SELECT * from hashes WHERE hash = ? OR file = ?;";
+const char check_for_duplicate_query[] = "SELECT * from hashes WHERE hash = ? OR name = ?;";
 const char add_tag_query[] = "INSERT INTO tags VALUES (?, ?, ?);";
 const char get_hash_by_filename_query[] = "SELECT hash FROM hashes WHERE file = ? LIMIT 1;";
 
@@ -44,7 +47,6 @@ static struct option global_command_line_options[] = {
 };
 
 static struct option add_command_line_options[] = {
-	{"vault",       no_argument,              NULL,        'v'},
 	{NULL,          0,                        NULL,         0}
 };
 
@@ -71,7 +73,7 @@ int isdirempty(const char* dirname) {
 	return ret_code;
 }
 
-int check_for_version_table(sqlite3* db) {
+int check_for_setting_table(sqlite3* db) {
 	sqlite3_stmt* stmt = NULL;
 	int statementdone = 0;
 	int found = 0;
@@ -86,7 +88,7 @@ int check_for_version_table(sqlite3* db) {
 		case SQLITE_ROW:
 			{
 				const unsigned char* tablename = sqlite3_column_text(stmt, 0);
-				if(strcmp(tablename, "version") == 0) {
+				if(strcmp(tablename, "settings") == 0) {
 					found = 1;
 					statementdone = 1;
 				}
@@ -167,7 +169,7 @@ sqlite3* open_database(const char* file_name) {
 		return NULL;
 	}
 
-	rc = check_for_version_table(db);
+	rc = check_for_setting_table(db);
 	// rc == 1 means the table was not found. we'll create it after checking for other errors.
 	if(rc == 0) {
 		version = get_version(db);
@@ -208,18 +210,18 @@ int set_default_filename() {
 	return 0;
 }
 
-int check_for_duplicate(sqlite3* db, const char* filename, const char* digest) {
+int check_for_duplicate(sqlite3* db, const char* name, const char* digest) {
 	sqlite3_stmt* stmt = NULL;
 	int step_return = 0;
 
 	if(sqlite3_prepare_v2(db, check_for_duplicate_query, -1, &stmt, NULL)) {
-		fprintf(stderr, "Error checking duplicate: %s\n", sqlite3_errmsg(db));
+		fprintf(stderr, "1 Error checking duplicate: %s\n", sqlite3_errmsg(db));
 		return 1;
 	}
 
 	if(sqlite3_bind_text(stmt, 1, digest, -1, SQLITE_TRANSIENT) ||
-	   sqlite3_bind_text(stmt, 2, filename, -1, SQLITE_TRANSIENT)) {
-		fprintf(stderr, "Error checking duplicate: %s\n", sqlite3_errmsg(db));
+	   sqlite3_bind_text(stmt, 2, name, -1, SQLITE_TRANSIENT)) {
+		fprintf(stderr, "2 Error checking duplicate: %s\n", sqlite3_errmsg(db));
 		sqlite3_finalize(stmt);
 		return 1;
 	}
@@ -232,7 +234,7 @@ int check_for_duplicate(sqlite3* db, const char* filename, const char* digest) {
 				printf("  %s  %s\n", sqlite3_column_text(stmt, 0), sqlite3_column_text(stmt, 1));
 				step_return = sqlite3_step(stmt);
 			} else {
-				fprintf(stderr, "Error checking duplicates: %s\n", sqlite3_errmsg(db));
+				fprintf(stderr, "3 Error checking duplicates: %s\n", sqlite3_errmsg(db));
 			}
 		} while(step_return == SQLITE_ROW);
 		return 1;
@@ -241,46 +243,62 @@ int check_for_duplicate(sqlite3* db, const char* filename, const char* digest) {
 	return 0;
 }
 
-int add_file(sqlite3* db, const char* filename) {
+int add_file(sqlite3* db, char* filename, char* name) {
 	char digest[SHA256_DIGEST_STRING_LENGTH];
 
 	if(SHA256File(filename, digest) == NULL) {
 		fprintf(stderr, "Error reading file: %s.\n", filename);
 		return 1;
 	} else {
-		char* abspath = realpath(filename, NULL);
+		pid_t pid;
+		sqlite3_stmt* stmt = NULL;
 
-		if(abspath != NULL) {
-			sqlite3_stmt* stmt = NULL;
-			printf("%s  %s\n", digest, abspath);
+		printf("%s  %s\n", digest, name);
 
-			if(check_for_duplicate(db, abspath, digest)) {
-				return 1;
-			}
-
-			if(sqlite3_prepare_v2(db, insert_file_query, -1, &stmt, NULL)) {
-				fprintf(stderr, "Error adding file to database: %s\n", sqlite3_errmsg(db));
-				return 1;
-			}
-
-			if(sqlite3_bind_text(stmt, 1, digest, -1, SQLITE_TRANSIENT) ||
-			    sqlite3_bind_text(stmt, 2, abspath, -1, SQLITE_TRANSIENT)) {
-				fprintf(stderr, "Error adding file to database: %s\n", sqlite3_errmsg(db));
-				sqlite3_finalize(stmt);
-				return 1;
-			}
-
-			if(sqlite3_step(stmt) != SQLITE_DONE) {
-				fprintf(stderr, "Error inserting hash for file %s: %s\n", filename, sqlite3_errmsg(db));
-				sqlite3_finalize(stmt);
-				return 1;
-			}
-
-			free(abspath);
-			sqlite3_finalize(stmt);
-		} else {
-			fprintf(stderr, "realpath() failed on %s.\n", filename);
+		if(check_for_duplicate(db, name, digest)) {
 			return 1;
+		}
+
+		if(sqlite3_prepare_v2(db, insert_file_query, -1, &stmt, NULL)) {
+			fprintf(stderr, "Error adding file to database: %s\n", sqlite3_errmsg(db));
+			return 1;
+		}
+
+		if(sqlite3_bind_text(stmt, 1, digest, -1, SQLITE_TRANSIENT) ||
+		    sqlite3_bind_text(stmt, 2, name, -1, SQLITE_TRANSIENT)) {
+			fprintf(stderr, "Error adding file to database: %s\n", sqlite3_errmsg(db));
+			sqlite3_finalize(stmt);
+			return 1;
+		}
+
+		if(sqlite3_step(stmt) != SQLITE_DONE) {
+			fprintf(stderr, "Error inserting hash for file %s: %s\n", filename, sqlite3_errmsg(db));
+			sqlite3_finalize(stmt);
+			return 1;
+		}
+
+		sqlite3_finalize(stmt);
+
+		if((pid = fork())) {
+			int status;
+			// Maybe we should make sure of the status?
+			if(pid != wait(&status)) {
+				fprintf(stderr, "We had more children than we thought!\n");
+				return 1;
+			} else if(WIFEXITED(status)) {
+				return WEXITSTATUS(status);
+			} else {
+				return 1;
+			}
+		} else {
+			char* argv[4] = {"/bin/mv",filename, NULL, NULL};
+			int arglen = strlen(digest) + strlen("hashes/") + 1;
+			argv[2] = calloc(arglen, sizeof(char));
+			strlcpy(argv[2], "hashes/", arglen);
+			strlcat(argv[2], digest, arglen);
+
+			printf("%s \"%s\" \"%s\"\n", argv[0], argv[1], argv[2]);
+			execv("/bin/mv", argv);
 		}
 	}
 
@@ -401,20 +419,12 @@ int tag_subcommand(sqlite3* db, int argc, char** argv) {
 
 int add_subcommand(sqlite3* db, int argc, char** argv) {
 	int ch = 0;
-	int vault = 0;
-	int i;
-	int return_code = 0;
 
 	optreset = 1;
 	optind = 1;
 
-	while((ch = getopt_long(argc, argv, "v", add_command_line_options, NULL)) != -1) {
+	while((ch = getopt_long(argc, argv, "", add_command_line_options, NULL)) != -1) {
 		switch(ch) {
-		case 'v':
-			vault = 1;
-			fprintf(stderr, "vault option not implemented.\n");
-			return 1;
-		default:
 			return 1;
 		};
 	}
@@ -425,15 +435,15 @@ int add_subcommand(sqlite3* db, int argc, char** argv) {
 	if(argc <= 0) {
 		fprintf(stderr, "No files to add.\n");
 		return 1;
+	} else if(argc == 1) {
+		char* filebasename = basename(argv[0]);
+		return add_file(db, argv[0], filebasename);
+	} else if(argc == 2) {
+		return add_file(db, argv[0], argv[1]);
+	} else {
+		fprintf(stderr, "Invalid number of arguments to add subcommand.\n");
+		return 1;
 	}
-
-	for(i = 0; argv[i] != NULL; ++i) {
-		if(add_file(db, argv[i]) != 0) {
-			return_code = 1;
-		}
-	}
-
-	return return_code;
 }
 
 int initialize_vault(const char* dirname) {
@@ -584,7 +594,16 @@ int main(int argc, char** argv) {
 		return 1;
 	}
 
+	if(strcmp(argv[0], "init")) {
+		db = open_database(tags_db_filename);
+		if(db == NULL) {
+			fprintf(stderr, "Current directory is not a vault.\n");
+		}
+	}
+
 	return_code = subcommand(db, argc, argv);
+
+	close_database(db);
 
 	return return_code;
 }
