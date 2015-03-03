@@ -31,6 +31,8 @@ const char check_for_duplicate_query[] = "SELECT * from hashes WHERE hash = ? OR
 const char add_tag_query[] = "INSERT INTO tags VALUES (?, ?, ?);";
 const char get_hash_by_name_query[] = "SELECT hash FROM hashes WHERE name = ?;";
 const char get_hash_by_prefix_query[] = "SELECT hash FROM hashes WHERE instr(hash, ?) == 1;";
+const char dump_hashes_by_prefix_query[] = "SELECT hash, name FROM hashes WHERE instr(hash, ?) == 1;";
+const char dump_tags_by_hash_query[] = "SELECT name, value FROM tags WHERE hash == ?;";
 
 char* database_file_name = NULL;
 size_t database_file_name_length = 0;
@@ -509,7 +511,7 @@ int init_subcommand(sqlite3* db, int argc, char** argv) {
 	optreset = 1;
 	optind = 1;
 
-	while((ch = getopt_long(argc, argv, "v", add_command_line_options, NULL)) != -1) {
+	while((ch = getopt_long(argc, argv, "", null_command_line_options, NULL)) != -1) {
 		switch(ch) {
 		default:
 			return 1;
@@ -553,10 +555,104 @@ int init_subcommand(sqlite3* db, int argc, char** argv) {
 	return ret_code;
 }
 
+int dump_hash_tags(sqlite3* db, const char* hash) {
+	sqlite3_stmt* stmt = NULL;
+	int rc = 0;
+
+	if(sqlite3_prepare_v2(db, dump_tags_by_hash_query, -1, &stmt, NULL)) {
+		fprintf(stderr, "Error 1 dump hash tags %s: %s\n", hash, sqlite3_errmsg(db));
+		return 1;
+	}
+
+	if(sqlite3_bind_text(stmt, 1, hash, -1, SQLITE_TRANSIENT)) {
+		fprintf(stderr, "Error 2 dump hash tags %s: %s\n", hash, sqlite3_errmsg(db));
+		sqlite3_finalize(stmt);
+		return 1;
+	}
+
+	while((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+		if(sqlite3_column_type(stmt, 1) == SQLITE_TEXT && strlen(sqlite3_column_text(stmt, 1)) > 0) {
+			printf("  %s  %s\n", sqlite3_column_text(stmt, 0), sqlite3_column_text(stmt, 1));
+		} else {
+			printf("  %s\n", sqlite3_column_text(stmt, 0));
+		}
+	}
+
+	if(rc != SQLITE_DONE) {
+		fprintf(stderr, "Error 3 dumping hash tags %s: %s\n", hash, sqlite3_errmsg(db));
+		sqlite3_finalize(stmt);
+		return 1;
+	}
+
+	sqlite3_finalize(stmt);
+	return 0;
+
+}
+
+int dump_hash_prefix(sqlite3* db, const char* hashprefix) {
+	sqlite3_stmt* stmt = NULL;
+	int rc = 0;
+
+	if(sqlite3_prepare_v2(db, dump_hashes_by_prefix_query, -1, &stmt, NULL)) {
+		fprintf(stderr, "Error 1 dumping hash by prefix %s: %s\n", hashprefix, sqlite3_errmsg(db));
+		return 1;
+	}
+
+	if(sqlite3_bind_text(stmt, 1, hashprefix, -1, SQLITE_TRANSIENT)) {
+		fprintf(stderr, "Error 2 dumping hash by prefix %s: %s\n", hashprefix, sqlite3_errmsg(db));
+		sqlite3_finalize(stmt);
+		return 1;
+	}
+
+	while((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+		printf("%s  %s\n", sqlite3_column_text(stmt, 1), sqlite3_column_text(stmt, 0));
+		if(dump_hash_tags(db, sqlite3_column_text(stmt, 0)) != 0) {
+			sqlite3_finalize(stmt);
+			return 1;
+		}
+	}
+
+	if(rc != SQLITE_DONE) {
+		fprintf(stderr, "Error 3 dumping hash by prefix %s: %s\n", hashprefix, sqlite3_errmsg(db));
+		sqlite3_finalize(stmt);
+		return 1;
+	}
+
+	sqlite3_finalize(stmt);
+	return 0;
+}
+
+int dump_subcommand(sqlite3* db, int argc, char** argv) {
+	int ch = 0;
+	char* prefix = NULL;
+
+	while((ch = getopt_long(argc, argv, "", null_command_line_options, NULL)) != -1) {
+		switch(ch) {
+		default:
+			return 1;
+		};
+	}
+
+	argc -= optind;
+	argv += optind;
+
+	if(argc == 0) {
+		prefix = "";
+	} else if(argc == 1) {
+		prefix = argv[0];
+	} else {
+		fprintf(stderr, "Too many args\n");
+		return 1;
+	}
+
+	return dump_hash_prefix(db, prefix);
+}
+
 subcommand_info valid_subcommands[] =
  {{"add", add_subcommand},
   {"tag", tag_subcommand},
   {"init", init_subcommand},
+  {"dump", dump_subcommand},
   {NULL, NULL}};
 
 int main(int argc, char** argv) {
