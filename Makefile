@@ -1,4 +1,4 @@
-CC := gcc --std=c99 -c -Wall -Wextra -O2
+CC := gcc --std=c99 -g -c -Wall -Wextra -O0
 LD := gcc --std=c99
 
 all: zenodotus

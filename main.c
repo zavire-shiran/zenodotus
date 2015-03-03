@@ -29,7 +29,8 @@ const char* create_tables_queries[] =
 const char insert_file_query[] = "INSERT INTO hashes VALUES (?, ?);";
 const char check_for_duplicate_query[] = "SELECT * from hashes WHERE hash = ? OR name = ?;";
 const char add_tag_query[] = "INSERT INTO tags VALUES (?, ?, ?);";
-const char get_hash_by_filename_query[] = "SELECT hash FROM hashes WHERE file = ? LIMIT 1;";
+const char get_hash_by_name_query[] = "SELECT hash FROM hashes WHERE name = ?;";
+const char get_hash_by_prefix_query[] = "SELECT hash FROM hashes WHERE instr(hash, ?) == 1;";
 
 char* database_file_name = NULL;
 size_t database_file_name_length = 0;
@@ -307,7 +308,6 @@ int add_file(sqlite3* db, char* filename, char* name) {
 
 int tag_hash(sqlite3* db, const char* hash, const char* tag, const char* value) {
 	sqlite3_stmt* stmt = NULL;
-	printf("%s %s %p\n", hash, tag, value);
 	if(sqlite3_prepare_v2(db, add_tag_query, -1, &stmt, NULL)) {
 		fprintf(stderr, "Error 1 adding tag to database: %s\n", sqlite3_errmsg(db));
 		return 1;
@@ -337,24 +337,30 @@ int tag_hash(sqlite3* db, const char* hash, const char* tag, const char* value) 
 	return 0;
 }
 
-const char* get_hash_by_filename(sqlite3* db, const char* filename) {
+const char* get_hash_by_prefix(sqlite3* db, const char* hashprefix) {
 	sqlite3_stmt* stmt = NULL;
 	const char* hash = NULL;
 	char* ret_hash = NULL;
+	int rc = 0;
 
-	if(sqlite3_prepare_v2(db, get_hash_by_filename_query, -1, &stmt, NULL)) {
-		fprintf(stderr, "Error 1 adding getting hash for file %s: %s\n", filename, sqlite3_errmsg(db));
+	if(sqlite3_prepare_v2(db, get_hash_by_prefix_query, -1, &stmt, NULL)) {
+		fprintf(stderr, "Error 1 adding getting hash by prefix %s: %s\n", hashprefix, sqlite3_errmsg(db));
 		return NULL;
 	}
 
-	if(sqlite3_bind_text(stmt, 1, filename, -1, SQLITE_TRANSIENT)) {
-		fprintf(stderr, "Error 2 getting hash for file %s: %s\n", filename, sqlite3_errmsg(db));
+	if(sqlite3_bind_text(stmt, 1, hashprefix, -1, SQLITE_TRANSIENT)) {
+		fprintf(stderr, "Error 2 getting hash by prefix %s: %s\n", hashprefix, sqlite3_errmsg(db));
 		sqlite3_finalize(stmt);
 		return NULL;
 	}
 
-	if(sqlite3_step(stmt) != SQLITE_ROW) {
-		fprintf(stderr, "Error 3 getting hash for file %s: %s\n", filename, sqlite3_errmsg(db));
+	rc = sqlite3_step(stmt);
+	if(rc != SQLITE_ROW) {
+		if(rc == SQLITE_DONE) {
+			fprintf(stderr, "Error 3 getting hash by prefix %s: No hashes with that prefix\n", hashprefix);
+		} else {
+			fprintf(stderr, "Error 3 code %d getting hash by prefix %s: %s\n", rc, hashprefix, sqlite3_errmsg(db));
+		}
 		sqlite3_finalize(stmt);
 		return NULL;
 	}
@@ -363,16 +369,24 @@ const char* get_hash_by_filename(sqlite3* db, const char* filename) {
 	ret_hash = calloc(strlen(hash) + 1, sizeof(char));
 	strlcpy(ret_hash, hash, strlen(hash) + 1);
 
+	rc = sqlite3_step(stmt);
+	if(rc != SQLITE_DONE) {
+		if(rc == SQLITE_ROW) {
+			fprintf(stderr, "Error 4 ambiguous hash prefix %s\n", hashprefix);
+		} else {
+			fprintf(stderr, "Error 5 error getting hash by prefix %s: %s\n", hashprefix, sqlite3_errmsg(db));
+		}
+		free(ret_hash);
+		ret_hash = NULL;
+	}
+
 	sqlite3_finalize(stmt);
 	return ret_hash;
 }
 
-int tag_file(sqlite3* db, const char* filename, const char* tag, const char* value) {
-	char* abspath = realpath(filename, NULL);
-	const char* hash = get_hash_by_filename(db, abspath);
+int tag_hash_prefix(sqlite3* db, const char* hashprefix, const char* tag, const char* value) {
+	const char* hash = get_hash_by_prefix(db, hashprefix);
 	int ret = 0;
-
-	free(abspath);
 
 	if(hash == NULL) {
 		return 1;
@@ -384,7 +398,7 @@ int tag_file(sqlite3* db, const char* filename, const char* tag, const char* val
 
 int tag_subcommand(sqlite3* db, int argc, char** argv) {
 	int ch = 0;
-	const char* filename = NULL;
+	const char* hashprefix = NULL;
 	const char* tag = NULL;
 	const char* value = NULL;
 
@@ -406,13 +420,13 @@ int tag_subcommand(sqlite3* db, int argc, char** argv) {
 		return 1;
 	}
 
-	filename = argv[0];
+	hashprefix = argv[0];
 	tag = argv[1];
 	if(argc == 3) {
 		value = argv[2];
 	}
 
-	tag_file(db, filename, tag, value);
+	tag_hash_prefix(db, hashprefix, tag, value);
 
 	return 0;
 }
